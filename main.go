@@ -133,7 +133,7 @@ func (h *hapticEngine) runPulseLoop() {
 		h.setMotors(req.right, req.left)
 		time.Sleep(time.Duration(req.durationMs) * time.Millisecond)
 		h.setMotors(0, 0)
-		time.Sleep(6 * time.Millisecond)
+		time.Sleep(3 * time.Millisecond)
 	}
 }
 
@@ -143,6 +143,11 @@ type pulseParams struct {
 	right    byte
 	left     byte
 	duration int
+}
+
+type hapticPair struct {
+	press   pulseParams
+	release pulseParams
 }
 
 const (
@@ -173,14 +178,30 @@ var inputNames = map[uint16]string{
 	VBTN_RS_UP: "RS Up", VBTN_RS_DOWN: "RS Down",
 }
 
-func defaultProfile() map[uint16]pulseParams {
-	click := pulseParams{right: 200, left: 30, duration: 15}
-	press := pulseParams{right: 220, left: 50, duration: 20}
-	thud := pulseParams{right: 255, left: 100, duration: 25}
-	tick := pulseParams{right: 150, left: 0, duration: 10}
-	axis := pulseParams{right: 220, left: 40, duration: 35}
+func defaultProfile() map[uint16]hapticPair {
+	// Trackpad-style: high-freq dominant, low-freq minimal
+	click := hapticPair{
+		press:   pulseParams{right: 255, left: 10, duration: 15},
+		release: pulseParams{right: 180, left: 0, duration: 15},
+	}
+	press := hapticPair{
+		press:   pulseParams{right: 255, left: 20, duration: 18},
+		release: pulseParams{right: 200, left: 0, duration: 15},
+	}
+	thud := hapticPair{
+		press:   pulseParams{right: 255, left: 50, duration: 22},
+		release: pulseParams{right: 200, left: 15, duration: 18},
+	}
+	tick := hapticPair{
+		press:   pulseParams{right: 220, left: 0, duration: 15},
+		release: pulseParams{right: 150, left: 0, duration: 15},
+	}
+	axis := hapticPair{
+		press:   pulseParams{right: 255, left: 10, duration: 15},
+		release: pulseParams{right: 180, left: 0, duration: 15},
+	}
 
-	return map[uint16]pulseParams{
+	return map[uint16]hapticPair{
 		BTN_SOUTH: click, BTN_EAST: click, BTN_NORTH: click, BTN_WEST: click,
 		BTN_TL: press, BTN_TR: press,
 		BTN_TL2: thud, BTN_TR2: thud,
@@ -208,7 +229,9 @@ func newStickState() *stickState {
 	return &stickState{active: make(map[uint16]bool)}
 }
 
-func (s *stickState) updateStick(axisCode uint16, value int32) (vbtn uint16, edge bool) {
+// updateStick returns (vbtn, pressed). pressed=true means edge entered,
+// pressed=false means edge released. edge=false means no transition.
+func (s *stickState) updateStick(axisCode uint16, value int32) (vbtn uint16, pressed bool, edge bool) {
 	var negBtn, posBtn uint16
 	var center, deadzone int32
 
@@ -226,7 +249,7 @@ func (s *stickState) updateStick(axisCode uint16, value int32) (vbtn uint16, edg
 	case ABS_RY:
 		negBtn, posBtn, center, deadzone = VBTN_RS_UP, VBTN_RS_DOWN, 128, stickDeadzone
 	default:
-		return 0, false
+		return 0, false, false
 	}
 
 	diff := value - center
@@ -240,21 +263,23 @@ func (s *stickState) updateStick(axisCode uint16, value int32) (vbtn uint16, edg
 		if !s.active[negBtn] {
 			s.active[negBtn] = true
 			s.active[posBtn] = false
-			return negBtn, true
+			return negBtn, true, true
 		}
-	} else {
+	} else if s.active[negBtn] {
 		s.active[negBtn] = false
+		return negBtn, false, true
 	}
 	if nowPos {
 		if !s.active[posBtn] {
 			s.active[posBtn] = true
 			s.active[negBtn] = false
-			return posBtn, true
+			return posBtn, true, true
 		}
-	} else {
+	} else if s.active[posBtn] {
 		s.active[posBtn] = false
+		return posBtn, false, true
 	}
-	return 0, false
+	return 0, false, false
 }
 
 // --- device discovery ---
@@ -363,25 +388,34 @@ func main() {
 		value := int32(binary.LittleEndian.Uint32(buf[unsafe.Offsetof(inputEvent{}.Value):]))
 
 		var triggerCode uint16
+		var pressed bool
 
 		switch {
-		case typ == EV_KEY && value == 1:
+		case typ == EV_KEY && (value == 1 || value == 0):
 			triggerCode = code
+			pressed = value == 1
 		case typ == EV_ABS:
-			if vbtn, edge := sticks.updateStick(code, value); edge {
+			if vbtn, pr, edge := sticks.updateStick(code, value); edge {
 				triggerCode = vbtn
+				pressed = pr
 			}
 		}
 
 		if triggerCode != 0 {
-			if p, ok := prof[triggerCode]; ok {
+			if pair, ok := prof[triggerCode]; ok {
+				p := pair.release
+				action := "release"
+				if pressed {
+					p = pair.press
+					action = "press"
+				}
 				engine.pulse(p.right, p.left, p.duration)
 				if *verbose {
 					n := inputNames[triggerCode]
 					if n == "" {
 						n = fmt.Sprintf("0x%x", triggerCode)
 					}
-					fmt.Printf("  -> %s\n", n)
+					fmt.Printf("  -> %s [%s]\n", n, action)
 				}
 			}
 		}
