@@ -259,24 +259,51 @@ func (s *stickState) updateStick(axisCode uint16, value int32) (vbtn uint16, pre
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if nowNeg {
-		if !s.active[negBtn] {
-			s.active[negBtn] = true
-			s.active[posBtn] = false
+	wasNeg := s.active[negBtn]
+	wasPos := s.active[posBtn]
+	s.active[negBtn] = nowNeg
+	s.active[posBtn] = nowPos
+
+	// Count how many directions on this stick were/are active (including cross-axis)
+	var siblings [4]uint16
+	switch {
+	case negBtn >= VBTN_DPAD_LEFT && negBtn <= VBTN_DPAD_DOWN:
+		siblings = [4]uint16{VBTN_DPAD_LEFT, VBTN_DPAD_RIGHT, VBTN_DPAD_UP, VBTN_DPAD_DOWN}
+	case negBtn >= VBTN_LS_LEFT && negBtn <= VBTN_LS_DOWN:
+		siblings = [4]uint16{VBTN_LS_LEFT, VBTN_LS_RIGHT, VBTN_LS_UP, VBTN_LS_DOWN}
+	case negBtn >= VBTN_RS_LEFT && negBtn <= VBTN_RS_DOWN:
+		siblings = [4]uint16{VBTN_RS_LEFT, VBTN_RS_RIGHT, VBTN_RS_UP, VBTN_RS_DOWN}
+	}
+
+	anyActive := false
+	for _, btn := range siblings {
+		if s.active[btn] {
+			anyActive = true
+			break
+		}
+	}
+
+	// Was anything active before this update? (check old state for this axis + current state for other axis)
+	wasAny := wasNeg || wasPos
+	for _, btn := range siblings {
+		if btn != negBtn && btn != posBtn && s.active[btn] {
+			wasAny = true
+			break
+		}
+	}
+
+	switch {
+	case anyActive && !wasAny:
+		// First tilt from neutral — press
+		if nowNeg {
 			return negBtn, true, true
 		}
-	} else if s.active[negBtn] {
-		s.active[negBtn] = false
-		return negBtn, false, true
-	}
-	if nowPos {
-		if !s.active[posBtn] {
-			s.active[posBtn] = true
-			s.active[negBtn] = false
-			return posBtn, true, true
+		return posBtn, true, true
+	case !anyActive && wasAny:
+		// Returned to full neutral — release
+		if wasNeg {
+			return negBtn, false, true
 		}
-	} else if s.active[posBtn] {
-		s.active[posBtn] = false
 		return posBtn, false, true
 	}
 	return 0, false, false
