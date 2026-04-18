@@ -367,36 +367,32 @@ func findDualSense() (evdev string, hidraw string, err error) {
 	return evdev, hidraw, nil
 }
 
-// --- main ---
+// --- session ---
 
-func main() {
-	verbose := flag.Bool("v", false, "verbose output")
-	flag.Parse()
-
+// runSession connects to the controller and processes events until disconnection.
+// Returns nil on clean disconnect (caller should retry), non-nil on fatal error.
+func runSession(verbose bool) error {
 	evdevPath, hidrawPath, err := findDualSense()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hapcon:", err)
-		os.Exit(1)
+		return err
 	}
 
 	evf, err := os.OpenFile(evdevPath, os.O_RDONLY, 0)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hapcon: open evdev %s: %v\n", evdevPath, err)
-		os.Exit(1)
+		return fmt.Errorf("open evdev %s: %w", evdevPath, err)
 	}
 	defer evf.Close()
 	name := getDeviceName(evf.Fd())
 
 	engine, err := newHapticEngine(hidrawPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hapcon: open hidraw %s: %v\n", hidrawPath, err)
-		os.Exit(1)
+		return fmt.Errorf("open hidraw %s: %w", hidrawPath, err)
 	}
 	defer engine.Close()
 
 	prof := defaultProfile()
 
-	fmt.Printf("hapcon: %s (%s) + hidraw (%s)\n", name, evdevPath, hidrawPath)
+	fmt.Printf("hapcon: connected %s (%s) + hidraw (%s)\n", name, evdevPath, hidrawPath)
 	fmt.Printf("  %d inputs mapped\n", len(prof))
 
 	sticks := newStickState()
@@ -406,8 +402,8 @@ func main() {
 	for {
 		_, err := io.ReadFull(evf, buf)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "hapcon: read: %v\n", err)
-			break
+			fmt.Fprintf(os.Stderr, "hapcon: disconnected (%v)\n", err)
+			return nil // retry
 		}
 
 		typ := binary.LittleEndian.Uint16(buf[unsafe.Offsetof(inputEvent{}.Type):])
@@ -437,7 +433,7 @@ func main() {
 					action = "press"
 				}
 				engine.pulse(p.right, p.left, p.duration)
-				if *verbose {
+				if verbose {
 					n := inputNames[triggerCode]
 					if n == "" {
 						n = fmt.Sprintf("0x%x", triggerCode)
@@ -446,5 +442,26 @@ func main() {
 				}
 			}
 		}
+	}
+}
+
+// --- main ---
+
+func main() {
+	verbose := flag.Bool("v", false, "verbose output")
+	flag.Parse()
+
+	fmt.Println("hapcon: waiting for DualSense...")
+
+	for {
+		err := runSession(*verbose)
+		if err != nil {
+			// Device not found yet — wait and retry
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		// Clean disconnect — wait for reconnect
+		fmt.Println("hapcon: waiting for DualSense...")
+		time.Sleep(2 * time.Second)
 	}
 }
