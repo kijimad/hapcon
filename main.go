@@ -65,9 +65,13 @@ type hapticEngine struct {
 	verbose bool
 }
 
-type pulseRequest struct {
+type pulseStep struct {
 	right, left byte
 	durationMs  int
+}
+
+type pulseRequest struct {
+	steps []pulseStep
 }
 
 func newHapticEngine(hidrawPath string) (*hapticEngine, error) {
@@ -109,12 +113,11 @@ func (h *hapticEngine) setMotors(right, left byte) {
 	h.hidraw.Write(h.buildReport(right, left))
 }
 
-func (h *hapticEngine) pulse(right, left byte, durationMs int) {
-	h.pulseCh <- pulseRequest{right, left, durationMs}
+func (h *hapticEngine) pulse(steps []pulseStep) {
+	h.pulseCh <- pulseRequest{steps: steps}
 }
 
 // runPulseLoop processes pulse requests sequentially in its own goroutine.
-// All setMotors calls happen here — fully synchronous.
 func (h *hapticEngine) runPulseLoop() {
 	for req := range h.pulseCh {
 		for {
@@ -130,8 +133,10 @@ func (h *hapticEngine) runPulseLoop() {
 			}
 		}
 	drained:
-		h.setMotors(req.right, req.left)
-		time.Sleep(time.Duration(req.durationMs) * time.Millisecond)
+		for _, step := range req.steps {
+			h.setMotors(step.right, step.left)
+			time.Sleep(time.Duration(step.durationMs) * time.Millisecond)
+		}
 		h.setMotors(0, 0)
 		time.Sleep(3 * time.Millisecond)
 	}
@@ -139,15 +144,9 @@ func (h *hapticEngine) runPulseLoop() {
 
 // --- haptic profile ---
 
-type pulseParams struct {
-	right    byte
-	left     byte
-	duration int
-}
-
 type hapticPair struct {
-	press   pulseParams
-	release pulseParams
+	press   []pulseStep
+	release []pulseStep
 }
 
 const (
@@ -179,26 +178,57 @@ var inputNames = map[uint16]string{
 }
 
 func defaultProfile() map[uint16]hapticPair {
-	// Trackpad-style: high-freq dominant, low-freq minimal
+	// Magic Trackpad style: sharp attack → immediate decay
+	// Two-step pulse: strong hit + brief softer tail
 	click := hapticPair{
-		press:   pulseParams{right: 255, left: 10, duration: 15},
-		release: pulseParams{right: 180, left: 0, duration: 15},
+		press: []pulseStep{
+			{right: 255, left: 40, durationMs: 10},
+			{right: 80, left: 0, durationMs: 6},
+		},
+		release: []pulseStep{
+			{right: 200, left: 0, durationMs: 12},
+			{right: 60, left: 0, durationMs: 5},
+		},
 	}
 	press := hapticPair{
-		press:   pulseParams{right: 255, left: 20, duration: 18},
-		release: pulseParams{right: 200, left: 0, duration: 15},
+		press: []pulseStep{
+			{right: 255, left: 60, durationMs: 12},
+			{right: 100, left: 0, durationMs: 6},
+		},
+		release: []pulseStep{
+			{right: 220, left: 0, durationMs: 12},
+			{right: 70, left: 0, durationMs: 5},
+		},
 	}
 	thud := hapticPair{
-		press:   pulseParams{right: 255, left: 50, duration: 22},
-		release: pulseParams{right: 200, left: 15, duration: 18},
+		press: []pulseStep{
+			{right: 255, left: 120, durationMs: 14},
+			{right: 120, left: 30, durationMs: 8},
+		},
+		release: []pulseStep{
+			{right: 220, left: 20, durationMs: 12},
+			{right: 70, left: 0, durationMs: 6},
+		},
 	}
 	tick := hapticPair{
-		press:   pulseParams{right: 220, left: 0, duration: 15},
-		release: pulseParams{right: 150, left: 0, duration: 15},
+		press: []pulseStep{
+			{right: 220, left: 0, durationMs: 10},
+			{right: 60, left: 0, durationMs: 5},
+		},
+		release: []pulseStep{
+			{right: 180, left: 0, durationMs: 10},
+			{right: 50, left: 0, durationMs: 5},
+		},
 	}
 	axis := hapticPair{
-		press:   pulseParams{right: 255, left: 10, duration: 15},
-		release: pulseParams{right: 180, left: 0, duration: 15},
+		press: []pulseStep{
+			{right: 255, left: 40, durationMs: 10},
+			{right: 80, left: 0, durationMs: 6},
+		},
+		release: []pulseStep{
+			{right: 200, left: 0, durationMs: 12},
+			{right: 60, left: 0, durationMs: 5},
+		},
 	}
 
 	return map[uint16]hapticPair{
@@ -426,13 +456,13 @@ func runSession(verbose bool) error {
 
 		if triggerCode != 0 {
 			if pair, ok := prof[triggerCode]; ok {
-				p := pair.release
+				steps := pair.release
 				action := "release"
 				if pressed {
-					p = pair.press
+					steps = pair.press
 					action = "press"
 				}
-				engine.pulse(p.right, p.left, p.duration)
+				engine.pulse(steps)
 				if verbose {
 					n := inputNames[triggerCode]
 					if n == "" {
